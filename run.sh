@@ -133,23 +133,27 @@ install_windows() {
                 choice=1
             fi
 
-            if [ "$choice" != "1" ]; then
+            if [ "$choice" = "1" ]; then
+                # 注入失败，直接启动
                 echo ""
-                echo -e "  ${GRAY}新开终端窗口后输入 ${CYAN}vid${RESET}${GRAY} 即可运行${RESET}"
-                echo -ne "  ${DIM}按回车启动 vid...${RESET}"; read -r
+                echo "  🚀 直接启动 vid..."
+                echo ""
+                cd "$SCRIPT_DIR" && exec bash ./vid
+            else
+                echo ""
+                echo "  新开终端窗口后输入 vid 即可运行"
+                printf "  按回车启动 vid..."; read -r
+                cd "$SCRIPT_DIR" && exec bash ./vid
             fi
-            ;;&
+            ;;
         *)
             # 直接启动 — 模拟 vid 界面
             echo ""
-            echo -e "  🚀 ${GREEN}直接启动 vid...${RESET}"
+            echo "  🚀 直接启动 vid..."
             echo ""
             cd "$SCRIPT_DIR" && exec bash ./vid
             ;;
     esac
-
-    # 如果选了2但注入失败，退回直接启动
-    cd "$SCRIPT_DIR" && exec bash ./vid
 }
 
 # ═══════════════════════════════════════════
