@@ -1,0 +1,405 @@
+#!/bin/bash
+# 🎬 VID - 视频资源下载器
+set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SITES_FILE="$SCRIPT_DIR/data/sites.json"
+CONFIG_FILE="$SCRIPT_DIR/data/config.json"
+PROGRESS_DIR="$SCRIPT_DIR/data/progress"
+cd "$SCRIPT_DIR"
+
+# ═══════════════════════════════════════════
+# 🎨 颜色
+# ═══════════════════════════════════════════
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'
+PURPLE='\033[0;35m'; CYAN='\033[0;36m'; WHITE='\033[1;37m'; GRAY='\033[0;90m'
+BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'; BG_GREEN='\033[42m'; BG_RED='\033[41m'
+
+# ═══════════════════════════════════════════
+# 📦 初始化
+# ═══════════════════════════════════════════
+init_sites() {
+    mkdir -p "$SCRIPT_DIR/data" "$PROGRESS_DIR"
+    [ -f "$SITES_FILE" ] || echo '[
+  {"name":"碟调网","base":"https://www.shyanhuai.com","search":"https://www.shyanhuai.com/vodsearch/-------------.html?wd={keyword}","method":"get"},
+  {"name":"52电影网","base":"https://www.52dgf.com","search":"https://www.52dgf.com/vodsearch/-------------.html","method":"post"},
+  {"name":"一起看影院","base":"https://www.kaiminglighting.com","search":"https://www.kaiminglighting.com/index.php?m=vod-search","method":"post"}
+]' > "$SITES_FILE"
+    [ -f "$CONFIG_FILE" ] || echo '{"proxy_enabled":false,"proxy_url":"http://127.0.0.1:1080"}' > "$CONFIG_FILE"
+}
+
+# 读取代理配置
+read_config() {
+    PROXY_ENABLED=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('proxy_enabled',False))" 2>/dev/null)
+    PROXY_URL=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('proxy_url',''))" 2>/dev/null)
+}
+
+# 获取代理参数
+get_proxy_flag() {
+    read_config
+    if [ "$PROXY_ENABLED" = "True" ] && [ -n "$PROXY_URL" ]; then
+        echo "-p $PROXY_URL"
+    fi
+}
+
+# ═══════════════════════════════════════════
+# 🧹 界面
+# ═══════════════════════════════════════════
+show_header() {
+    clear
+    read_config
+    # 代理状态
+    if [ "$PROXY_ENABLED" = "True" ]; then
+        proxy_status="${GREEN}● 代理开启${RESET} ${GRAY}${PROXY_URL}${RESET}"
+    else
+        proxy_status="${RED}● 代理关闭${RESET}"
+    fi
+    echo ""
+    echo -e "${PURPLE}╔══════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${PURPLE}║${RESET}  🎬 ${BOLD}${CYAN}VID${RESET} ${GRAY}-${RESET} ${WHITE}视频资源下载器${RESET}  🔥🔥🔥                        ${PURPLE}║${RESET}"
+    echo -e "${PURPLE}║${RESET}  ${proxy_status}                                      ${PURPLE}║${RESET}"
+    echo -e "${PURPLE}╚══════════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+}
+
+show_menu() {
+    show_header
+    echo -e "  ${BOLD}请选择操作:${RESET}"
+    echo ""
+    echo -e "    ${CYAN}[1]${RESET} 🔍 搜索电影  ${DIM}(默认)${RESET}"
+    echo -e "    ${CYAN}[2]${RESET} ⚙️  管理网站  ${DIM}(新增/删除)${RESET}"
+    echo -e "    ${CYAN}[3]${RESET} 🌐 代理设置  ${DIM}(开关/配置)${RESET}"
+    echo ""
+    echo -e "  ${GRAY}───────────────────────────────────────${RESET}"
+    echo -ne "  ${BOLD}请选择 [1]: ${RESET}"
+    read -r choice
+    choice=${choice:-1}
+    case "$choice" in
+        1) search_flow ;;
+        2) manage_sites ;;
+        3) proxy_settings ;;
+        *) show_menu ;;
+    esac
+}
+
+# ═══════════════════════════════════════════
+# 🔍 搜索电影
+# ═══════════════════════════════════════════
+search_flow() {
+    show_header
+    echo -e "  🔍 ${BOLD}搜索电影${RESET}"
+    echo ""
+    echo -ne "  🎬 输入电影名称: ${RESET}"
+    read -r keyword
+    [ -z "$keyword" ] && { search_flow; return; }
+    echo ""
+    echo -ne "  📋 查询资源数量 ${DIM}[1-50, 默认5]${RESET}: ${RESET}"
+    read -r limit; limit=${limit:-5}
+    [[ ! "$limit" =~ ^[0-9]+$ ]] || [ "$limit" -lt 1 ] || [ "$limit" -gt 50 ] && limit=5
+
+    # 搜索动画
+    echo ""
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local proxy_flag=$(get_proxy_flag)
+    (
+        python3 main.py search "$keyword" -d -l $limit $proxy_flag --pipe 2>/dev/null \
+            | grep -E '^[^|]+\|https?://' > /tmp/vid_search_results.txt
+        echo "DONE" > /tmp/vid_search_done.flag
+    ) &
+    local pid=$!; local i=0
+    while [ ! -f /tmp/vid_search_done.flag ]; do
+        echo -ne "\r  🔍 正在搜索 ${CYAN}${spin:i%${#spin}:1}${RESET}  "
+        sleep 0.1; ((i++))
+    done; rm -f /tmp/vid_search_done.flag; wait $pid 2>/dev/null
+    echo -ne "\r  ✅ ${GREEN}搜索完成!${RESET}                    \n"; sleep 0.3
+    show_results "$keyword"
+}
+
+# ═══════════════════════════════════════════
+# 📊 搜索结果
+# ═══════════════════════════════════════════
+show_results() {
+    local keyword="$1"; local file="/tmp/vid_search_results.txt"
+    [ ! -f "$file" ] || [ ! -s "$file" ] && { echo -e "\n  ❌ ${RED}未找到结果${RESET}"; read -r; show_menu; return; }
+
+    local titles=() urls=() sources=()
+    while IFS='|' read -r t u s; do titles+=("$t"); urls+=("$u"); sources+=("$s"); done < "$file"
+    local total=${#titles[@]}; local per_page=10
+    local total_pages=$(( (total + per_page - 1) / per_page )); local page=1
+
+    display_page() {
+        local p=$1; local start=$(( (p-1)*per_page )); local end=$(( start+per_page ))
+        [ $end -gt $total ] && end=$total
+        show_header
+        echo -e "  🔍 ${BOLD}搜索结果${RESET} ${GRAY}-${RESET} ${WHITE}${keyword}${RESET}  ${GRAY}共 ${total} 个资源${RESET}"
+        echo -e "  📄 ${GRAY}第 ${p}/${total_pages} 页${RESET}"
+        echo ""
+        echo -e "  ${PURPLE}┌──────┬────────────────────────────────────┬──────────────┐${RESET}"
+        printf "  ${PURPLE}│${RESET} ${BOLD}%-4s${RESET} ${PURPLE}│${RESET} ${BOLD}%-34s${RESET} ${PURPLE}│${RESET} ${BOLD}%-12s${RESET} ${PURPLE}│${RESET}\n" "序号" "标题" "来源"
+        echo -e "  ${PURPLE}├──────┼────────────────────────────────────┼──────────────┤${RESET}"
+        for (( i=start; i<end; i++ )); do
+            local idx=$((i+1)); local t="${titles[$i]}"; [ ${#t} -gt 32 ] && t="${t:0:30}.."
+            printf "  ${PURPLE}│${RESET} ${CYAN}%-4s${RESET} ${PURPLE}│${RESET} %-34s ${PURPLE}│${RESET} ${YELLOW}%-12s${RESET} ${PURPLE}│${RESET}\n" "$idx" "$t" "${sources[$i]}"
+        done
+        echo -e "  ${PURPLE}└──────┴────────────────────────────────────┴──────────────┘${RESET}"
+        echo ""
+        echo -e "  ${GRAY}[q]${RESET} ◀️ 上一页   ${GRAY}[e]${RESET} ▶️ 下一页   ${GRAY}[数字]${RESET} 选择下载 ${DIM}(逗号分隔多个)${RESET}"
+        echo -e "  ${GRAY}[b]${RESET} 返回菜单"
+    }
+
+    while true; do
+        display_page "$page"
+        echo -ne "\n  ${BOLD}>>> ${RESET}"
+        read -r input
+        case "$input" in
+            q|Q) [ $page -gt 1 ] && ((page--)) ;;
+            e|E) [ $page -lt $total_pages ] && ((page++)) ;;
+            b|B) show_menu; return ;;
+            *)
+                if [[ "$input" =~ ^[0-9,]+$ ]]; then
+                    IFS=',' read -ra sels <<< "$input"
+                    local dl_urls=() dl_titles=() dl_sources=() dl_names=()
+                    for sel in "${sels[@]}"; do
+                        sel=$(echo "$sel" | tr -d ' ')
+                        [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$total" ] && {
+                            local idx=$((sel-1))
+                            dl_urls+=("${urls[$idx]}")
+                            dl_titles+=("${titles[$idx]}")
+                            dl_sources+=("${sources[$idx]}")
+                            dl_names+=("${titles[$idx]}_${sources[$idx]}")
+                        }
+                    done
+                    [ ${#dl_urls[@]} -gt 0 ] && { download_multiple "${dl_urls[@]}" "${dl_names[@]}"; return; }
+                fi
+                ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════
+# ⬇️ 多任务下载
+# ═══════════════════════════════════════════
+download_multiple() {
+    local args=("$@")
+    local half=$(( ${#args[@]} / 2 ))
+    local urls=("${args[@]:0:$half}")
+    local names=("${args[@]:$half}")
+    local count=${#urls[@]}
+
+    show_header
+    read_config
+    echo -e "  ⬇️  ${BOLD}开始下载 ${count} 个视频${RESET}"
+    [ "$PROXY_ENABLED" = "True" ] && echo -e "  🌐 ${GREEN}代理已开启${RESET} ${GRAY}${PROXY_URL}${RESET}"
+    echo ""
+
+    local proxy_flag=$(get_proxy_flag)
+    local dl_dir="$SCRIPT_DIR/downloads"
+
+    for i in "${!urls[@]}"; do
+        local safe_name=$(echo "${names[$i]}" | tr '/:*?"<>|' '_')
+        echo -e "  🎬 ${WHITE}${names[$i]}${RESET}"
+    done
+    echo ""
+    echo -e "  ${GRAY}───────────────────────────────────────${RESET}"
+    echo ""
+
+    # 逐个下载
+    for i in "${!urls[@]}"; do
+        local safe_name=$(echo "${names[$i]}" | tr '/:*?"<>|' '_')
+        local fname="${names[$i]}"
+
+        echo -e "  📥 ${WHITE}${fname}${RESET}"
+
+        # 后台下载
+        python3 main.py download "${urls[$i]}" --name "$safe_name" $proxy_flag > /tmp/vid_dl_$i.log 2>&1 &
+        local pid=$!
+
+        # 进度条（只显示文件大小增长）
+        local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+        local j=0; local bar_width=30
+        while kill -0 $pid 2>/dev/null; do
+            local char="${spin:j%${#spin}:1}"
+            local dl_file=$(find "$dl_dir" -name "${safe_name}*.mp4" -maxdepth 1 2>/dev/null | head -1)
+            local cur_display="准备中..."
+            local bar=""
+            if [ -n "$dl_file" ] && [ -f "$dl_file" ]; then
+                local cur_bytes=$(stat -f%z "$dl_file" 2>/dev/null || echo 0)
+                cur_display=$(python3 -c "s=$cur_bytes; u=['B','KB','MB','GB']; i=0; s=float(s)
+while s>=1024 and i<3: s/=1024; i+=1
+print(f'{s:.1f}{u[i]}')" 2>/dev/null)
+                # 跑马灯进度条
+                for (( b=0; b<bar_width; b++ )); do
+                    if [ $(( (j/2 + b) % bar_width )) -lt 4 ]; then bar="${bar}▓"; else bar="${bar}░"; fi
+                done
+            else
+                for (( b=0; b<bar_width; b++ )); do
+                    if [ $(( (j/3 + b) % bar_width )) -lt 2 ]; then bar="${bar}▓"; else bar="${bar}░"; fi
+                done
+            fi
+            echo -ne "\r  ${CYAN}${char}${RESET} [${CYAN}${bar}${RESET}] ${WHITE}${cur_display}${RESET}   "
+            sleep 0.2; ((j++))
+        done
+        wait $pid 2>/dev/null
+
+        # 检查结果
+        local dl_file=$(find "$dl_dir" -name "${safe_name}*.mp4" -maxdepth 1 2>/dev/null | head -1)
+        if [ -n "$dl_file" ] && [ -f "$dl_file" ]; then
+            local final_bytes=$(stat -f%z "$dl_file" 2>/dev/null || echo 0)
+            local size_display=$(python3 -c "s=$final_bytes; u=['B','KB','MB','GB']; i=0; s=float(s)
+while s>=1024 and i<3: s/=1024; i+=1
+print(f'{s:.1f}{u[i]}')" 2>/dev/null)
+            echo -ne "\r  ✅ ${GREEN}下载完成!${RESET} ${WHITE}${size_display}${RESET} ${dl_file}                    \n"
+        else
+            echo -ne "\r  ❌ ${RED}下载失败${RESET}                    \n"
+            grep -i "error\|失败" /tmp/vid_dl_$i.log 2>/dev/null | tail -1
+        fi
+        echo ""
+    done
+
+    echo -e "  ${GRAY}───────────────────────────────────────${RESET}"
+    echo -e "  ✅ ${GREEN}全部完成!${RESET} 文件保存在: ${CYAN}downloads/${RESET}"
+    echo ""
+    echo -ne "  ${DIM}按回车返回菜单...${RESET}"; read -r; show_menu
+}
+
+# ═══════════════════════════════════════════
+# ⚙️ 管理网站
+# ═══════════════════════════════════════════
+manage_sites() {
+    show_header
+    echo -e "  ⚙️  ${BOLD}网站管理${RESET}"
+    echo ""
+    echo -e "    ${CYAN}[1]${RESET} 📋 查看所有网站"
+    echo -e "    ${CYAN}[2]${RESET} ➕ 新增网站"
+    echo -e "    ${CYAN}[3]${RESET} 🗑️  删除网站"
+    echo -e "    ${CYAN}[4]${RESET} 返回主菜单"
+    echo ""
+    echo -ne "  ${BOLD}请选择: ${RESET}"
+    read -r m; case "$m" in
+        1) list_sites ;;
+        2) add_site ;;
+        3) remove_site ;;
+        *) manage_sites ;;
+    esac
+}
+
+list_sites() {
+    show_header; echo -e "  📋 ${BOLD}已配置的网站${RESET}\n"
+    python3 -c "
+import json
+sites = json.load(open('$SITES_FILE'))
+for i,s in enumerate(sites,1):
+    print(f'  {i}. {s[\"name\"]:16s} {s[\"base\"]}')
+print(f'\n  共 {len(sites)} 个网站')
+" 2>/dev/null
+    echo -ne "\n  ${DIM}按回车返回...${RESET}"; read -r; manage_sites
+}
+
+add_site() {
+    show_header; echo -e "  ➕ ${BOLD}新增网站${RESET} ${GRAY}(需基于MACCMS)${RESET}\n"
+    echo -ne "  🎬 网站名称: ${RESET}"; read -r sname
+    [ -z "$sname" ] && { manage_sites; return; }
+    echo -ne "  🌐 网站地址: ${RESET}"; read -r sbase; sbase="${sbase%/}"
+    echo -e "\n  搜索方式:\n    ${CYAN}[1]${RESET} GET (默认)    ${CYAN}[2]${RESET} POST"
+    echo -ne "  选择 [1]: ${RESET}"; read -r mchoice; mchoice=${mchoice:-1}
+    if [ "$mchoice" = "2" ]; then
+        echo -ne "  搜索路径: ${RESET}"; read -r spath; smethod="post"; surl="${sbase}${spath}"
+    else
+        smethod="get"; surl="${sbase}/vodsearch/-------------.html?wd={keyword}"
+    fi
+    python3 -c "
+import json
+sites=json.load(open('$SITES_FILE'))
+sites.append({'name':'$sname','base':'$sbase','search':'$surl','method':'$smethod'})
+json.dump(sites,open('$SITES_FILE','w'),ensure_ascii=False,indent=2)
+" 2>/dev/null
+    echo -e "\n  ✅ ${GREEN}已添加: ${sname}${RESET}"; sleep 1; manage_sites
+}
+
+remove_site() {
+    show_header; echo -e "  🗑️  ${BOLD}删除网站${RESET}\n"
+    python3 -c "
+import json
+sites=json.load(open('$SITES_FILE'))
+for i,s in enumerate(sites,1): print(f'  {i}. {s[\"name\"]}')
+" 2>/dev/null
+    echo -ne "\n  输入要删除的序号 ${DIM}(逗号分隔, 0=取消)${RESET}: ${RESET}"
+    read -r del; [ "$del" = "0" ] || [ -z "$del" ] && { manage_sites; return; }
+    python3 -c "
+import json
+sites=json.load(open('$SITES_FILE'))
+for i in sorted(set(int(x)-1 for x in '$del'.split(',')),reverse=True):
+    if 0<=i<len(sites): print(f'  已删除: {sites[i][\"name\"]}'); del sites[i]
+json.dump(sites,open('$SITES_FILE','w'),ensure_ascii=False,indent=2)
+" 2>/dev/null
+    sleep 1; manage_sites
+}
+
+# ═══════════════════════════════════════════
+# 🌐 代理设置
+# ═══════════════════════════════════════════
+proxy_settings() {
+    show_header
+    read_config
+    echo -e "  🌐 ${BOLD}代理设置${RESET}"
+    echo ""
+    if [ "$PROXY_ENABLED" = "True" ]; then
+        echo -e "  当前状态: ${GREEN}● 已开启${RESET}"
+        echo -e "  代理地址: ${WHITE}${PROXY_URL}${RESET}"
+    else
+        echo -e "  当前状态: ${RED}● 已关闭${RESET}"
+        echo -e "  代理地址: ${GRAY}${PROXY_URL:-未配置}${RESET}"
+    fi
+    echo ""
+    echo -e "    ${CYAN}[1]${RESET} 🔄 开关代理 ${DIM}(当前: ${PROXY_ENABLED})${RESET}"
+    echo -e "    ${CYAN}[2]${RESET} ✏️  配置代理地址"
+    echo -e "    ${CYAN}[3]${RESET} 返回主菜单"
+    echo ""
+    echo -ne "  ${BOLD}请选择: ${RESET}"
+    read -r pchoice
+    case "$pchoice" in
+        1) toggle_proxy ;;
+        2) config_proxy ;;
+        *) show_menu ;;
+    esac
+}
+
+toggle_proxy() {
+    read_config
+    if [ "$PROXY_ENABLED" = "True" ]; then
+        python3 -c "
+import json
+c=json.load(open('$CONFIG_FILE')); c['proxy_enabled']=False
+json.dump(c,open('$CONFIG_FILE','w'),ensure_ascii=False,indent=2)
+" 2>/dev/null
+        echo -e "\n  ${RED}● 代理已关闭${RESET}"
+    else
+        python3 -c "
+import json
+c=json.load(open('$CONFIG_FILE')); c['proxy_enabled']=True
+json.dump(c,open('$CONFIG_FILE','w'),ensure_ascii=False,indent=2)
+" 2>/dev/null
+        echo -e "\n  ${GREEN}● 代理已开启${RESET}"
+    fi
+    sleep 1; proxy_settings
+}
+
+config_proxy() {
+    show_header; echo -e "  ✏️  ${BOLD}配置代理地址${RESET}\n"
+    echo -e "  ${GRAY}当前: ${PROXY_URL}${RESET}"
+    echo ""
+    echo -ne "  输入代理地址 ${DIM}(如 http://127.0.0.1:1080)${RESET}: ${RESET}"
+    read -r new_url
+    [ -z "$new_url" ] && { proxy_settings; return; }
+    python3 -c "
+import json
+c=json.load(open('$CONFIG_FILE')); c['proxy_url']='$new_url'
+json.dump(c,open('$CONFIG_FILE','w'),ensure_ascii=False,indent=2)
+" 2>/dev/null
+    echo -e "\n  ✅ ${GREEN}代理地址已更新: ${new_url}${RESET}"; sleep 1; proxy_settings
+}
+
+# ═══════════════════════════════════════════
+# 🚀 启动
+# ═══════════════════════════════════════════
+init_sites
+show_menu
